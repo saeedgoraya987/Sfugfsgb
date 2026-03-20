@@ -1,10 +1,7 @@
 import axios from 'axios';
 import https from 'https';
 
-const axiosInstance = axios.create({
-  httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-  responseType: 'stream'
-});
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 function generateIdentity() {
   const getPart = () => Math.floor(Math.random() * 254) + 1;
@@ -27,12 +24,16 @@ export default async function handler(req, res) {
   
   try {
     const ident = generateIdentity();
-    const response = await axiosInstance.get(url, {
+    const response = await axios({
+      method: 'GET',
+      url: url,
+      responseType: 'stream',
       headers: {
         'User-Agent': ident.ua,
         'Referer': 'https://ximagine.io',
         'Accept': '*/*'
       },
+      httpsAgent,
       timeout: 60000
     });
     
