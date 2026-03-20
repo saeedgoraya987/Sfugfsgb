@@ -7,6 +7,7 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const CONFIG = {
   API_BASE: process.env.API_BASE || 'https://api.ximagine.io/aimodels/api/v1',
   ORIGIN_URL: process.env.ORIGIN_URL || 'https://ximagine.io',
+  AUTH_TOKEN: process.env.AUTH_TOKEN || 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJsb2dpblR5cGUiOiJsb2dpbiIsImxvZ2luSWQiOiJ4aW1hZ2luZS5pby11c2VyLTc2MjkzNCIsInJuU3RyIjoiUE9GbHBJRm1vOTlyalBLd2RRT1pac3hSRkg0NDJJSmcifQ.V8QaTImPoiZe_PyL0bkkHMMNwEltTTPeAhK93QLLKI4',
   DEFAULT_MODEL: 'grok-video-normal',
   MAX_PROMPT_LENGTH: 1800,
   MODEL_MAP: {
@@ -37,8 +38,9 @@ function getHeaders(uniqueId = null) {
   const ident = generateIdentity();
   const uid = uniqueId || uuidv4().replace(/-/g, '');
   return {
-    'Accept': '*/*',
+    'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'en-US,en;q=0.9',
+    'Authorization': `Bearer ${CONFIG.AUTH_TOKEN}`,
     'Origin': CONFIG.ORIGIN_URL,
     'Referer': `${CONFIG.ORIGIN_URL}/`,
     'User-Agent': ident.ua,
@@ -48,35 +50,34 @@ function getHeaders(uniqueId = null) {
     'sec-ch-ua': ident.secChUa,
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
+    'Content-Type': 'application/json',
   };
 }
 
 function buildPayload(prompt, modelConfig, aspectRatio, imageUrls) {
   const apiRatio = CONFIG.RATIO_MAP[aspectRatio] || aspectRatio;
+  
   const payload = {
     prompt: prompt,
     channel: modelConfig.channel,
     pageId: modelConfig.pageId,
-    source: 'ximagine.io',
+    source: "ximagine.io",
     watermarkFlag: true,
     removeWatermark: true,
     private: false,
     privateFlag: false,
     isTemp: true,
-    model: 'grok-imagine',
-    videoType: 'text-to-video',
+    model: "grok-imagine",
     aspectRatio: apiRatio,
-    imageUrls: []
+    imageUrls: imageUrls || []
   };
-  
-  if (modelConfig.type === 'video') {
+
+  if (modelConfig.type === "video") {
     payload.mode = modelConfig.mode;
-    if (imageUrls && imageUrls.length > 0) {
-      payload.videoType = 'image-to-video';
-      payload.imageUrls = imageUrls;
-    }
+    payload.videoType = imageUrls && imageUrls.length > 0 ? "image-to-video" : "text-to-video";
   }
-  
+
+  console.log('[PAYLOAD]', JSON.stringify(payload, null, 2));
   return payload;
 }
 
@@ -90,7 +91,8 @@ export default async function handler(req, res) {
   
   let prompt = '';
   let imageUrls = [];
-  let aspectRatio = '1:1';
+  let aspectRatio = '16:9';
+  let clientPollMode = true;
   
   const lastContent = messages[messages.length - 1].content;
   
@@ -100,7 +102,8 @@ export default async function handler(req, res) {
         const parsed = JSON.parse(lastContent);
         prompt = parsed.prompt || '';
         imageUrls = parsed.imageUrls || [];
-        aspectRatio = parsed.aspectRatio || '1:1';
+        aspectRatio = parsed.aspectRatio || '16:9';
+        clientPollMode = parsed.clientPollMode !== false;
         if (parsed.model && CONFIG.MODEL_MAP[parsed.model]) {
           body.model = parsed.model;
         }
@@ -133,38 +136,55 @@ export default async function handler(req, res) {
   const uniqueId = uuidv4().replace(/-/g, '');
   
   console.log(`[Request] model=${modelKey} | ratio=${aspectRatio} | prompt=${prompt.substring(0, 60)}...`);
+  console.log(`[Request] imageUrls:`, imageUrls);
   
   try {
     const headers = getHeaders(uniqueId);
     const payload = buildPayload(prompt, modelConfig, aspectRatio, imageUrls);
+    
+    // Use the correct endpoint
     const endpoint = modelConfig.type === 'video' 
       ? `${CONFIG.API_BASE}/ai/video/create`
       : `${CONFIG.API_BASE}/ai/grok/create`;
+    
+    console.log(`[Endpoint] ${endpoint}`);
+    console.log(`[Headers]`, JSON.stringify(headers, null, 2));
     
     const response = await axios.post(endpoint, payload, { 
       headers, 
       timeout: 30000,
       httpsAgent
     });
+    
+    console.log(`[Response Status] ${response.status}`);
+    console.log(`[Response Data]`, JSON.stringify(response.data, null, 2));
+    
     const responseData = response.data;
     
-    if (responseData.code !== 200) {
+    if (responseData.code === 200 && responseData.data) {
+      const taskId = responseData.data;
+      
+      return res.json({
+        success: true,
+        taskId: taskId,
+        uniqueId: uniqueId,
+        model: modelKey,
+        type: modelConfig.type,
+        prompt: prompt,
+        aspectRatio: aspectRatio
+      });
+    } else {
       throw new Error(`Upstream rejected: ${JSON.stringify(responseData)}`);
     }
     
-    const taskId = responseData.data;
-    
-    return res.json({
-      taskId: taskId,
-      uniqueId: uniqueId,
-      model: modelKey,
-      type: modelConfig.type,
-      prompt: prompt,
-      aspectRatio: aspectRatio
-    });
-    
   } catch (error) {
-    console.error(`[Generation error] ${error.message}`);
-    return res.status(500).json({ error: error.message });
+    console.error(`[Generation error]`, error.response?.data || error.message);
+    
+    // Return more detailed error
+    return res.status(500).json({ 
+      error: error.message,
+      details: error.response?.data || 'No additional details',
+      status: error.response?.status
+    });
   }
 }
