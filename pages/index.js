@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Head from 'next/head';
 
 export default function Home() {
@@ -11,6 +11,7 @@ export default function Home() {
   const [tasks, setTasks] = useState([]);
   const [history, setHistory] = useState([]);
   const fileInputRef = useRef(null);
+  const pollIntervals = useRef({});
   
   const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
   
@@ -54,6 +55,61 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
   
+  const pollTaskStatus = (localTaskId, realTaskId, uniqueId) => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/query-status?taskId=${realTaskId}&uniqueId=${uniqueId}&type=video`);
+        const data = await response.json();
+        
+        if (data.status === 'completed') {
+          clearInterval(pollInterval);
+          delete pollIntervals.current[localTaskId];
+          
+          setTasks(prev => prev.filter(t => t.id !== localTaskId));
+          setHistory(prev => {
+            const task = tasks.find(t => t.id === localTaskId);
+            return [{
+              id: `hist_${Date.now()}`,
+              prompt: task?.prompt || prompt,
+              url: data.videoUrl || (data.urls && data.urls[0]),
+              model: task?.model || `grok-video-${videoStyle}`,
+              ratio: task?.ratio || aspectRatio,
+              createdAt: new Date().toISOString()
+            }, ...prev];
+          });
+          setGenerating(false);
+        } else if (data.status === 'failed') {
+          clearInterval(pollInterval);
+          delete pollIntervals.current[localTaskId];
+          setTasks(prev => prev.map(t => 
+            t.id === localTaskId ? { ...t, status: 'failed', error: data.error } : t
+          ));
+          setGenerating(false);
+        } else if (data.progress) {
+          setTasks(prev => prev.map(t => 
+            t.id === localTaskId ? { ...t, progress: data.progress } : t
+          ));
+        }
+      } catch (error) {
+        console.error('Poll error:', error);
+      }
+    }, 2000);
+    
+    pollIntervals.current[localTaskId] = pollInterval;
+    
+    // Timeout after 2 minutes
+    setTimeout(() => {
+      if (pollIntervals.current[localTaskId]) {
+        clearInterval(pollIntervals.current[localTaskId]);
+        delete pollIntervals.current[localTaskId];
+        setTasks(prev => prev.map(t => 
+          t.id === localTaskId ? { ...t, status: 'failed', error: 'Generation timed out' } : t
+        ));
+        setGenerating(false);
+      }
+    }, 120000);
+  };
+  
   const generateVideo = async () => {
     if (!prompt.trim()) {
       alert('Please enter a prompt');
@@ -63,9 +119,9 @@ export default function Home() {
     setGenerating(true);
     
     const modelId = uploadedImageUrl ? 'grok-video-image' : `grok-video-${videoStyle}`;
-    const taskId = `task_${Date.now()}`;
+    const localTaskId = `task_${Date.now()}`;
     const newTask = {
-      id: taskId,
+      id: localTaskId,
       prompt: prompt,
       model: modelId,
       ratio: aspectRatio,
@@ -90,33 +146,14 @@ export default function Home() {
               clientPollMode: true,
               imageUrls: uploadedImageUrl ? [uploadedImageUrl] : []
             })
-          }],
-          stream: true
+          }]
         })
       });
       
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let realTaskId = null;
-      let uniqueId = null;
+      const data = await response.json();
       
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        
-        const taskMatch = buffer.match(/TASK_ID:\s*([^\n\]]+)/);
-        const uidMatch = buffer.match(/UID:\s*([^\n\]]+)/);
-        
-        if (taskMatch && !realTaskId) realTaskId = taskMatch[1].trim();
-        if (uidMatch && !uniqueId) uniqueId = uidMatch[1].trim();
-        
-        if (realTaskId && uniqueId) break;
-      }
-      
-      if (realTaskId) {
-        pollTaskStatus(taskId, realTaskId, uniqueId);
+      if (data.taskId) {
+        pollTaskStatus(localTaskId, data.taskId, data.uniqueId);
       } else {
         throw new Error('Could not retrieve task ID');
       }
@@ -124,56 +161,10 @@ export default function Home() {
     } catch (error) {
       console.error('Generation error:', error);
       setTasks(prev => prev.map(t => 
-        t.id === taskId ? { ...t, status: 'failed', error: error.message } : t
+        t.id === localTaskId ? { ...t, status: 'failed', error: error.message } : t
       ));
       setGenerating(false);
     }
-  };
-  
-  const pollTaskStatus = async (localTaskId, realTaskId, uniqueId) => {
-    const pollInterval = setInterval(async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/query-status?taskId=${realTaskId}&uniqueId=${uniqueId}&type=video`);
-        const data = await response.json();
-        
-        if (data.status === 'completed') {
-          clearInterval(pollInterval);
-          setTasks(prev => prev.filter(t => t.id !== localTaskId));
-          setHistory(prev => [{
-            id: `hist_${Date.now()}`,
-            prompt: prompt,
-            url: data.videoUrl || (data.urls && data.urls[0]),
-            model: `grok-video-${videoStyle}`,
-            ratio: aspectRatio,
-            createdAt: new Date().toISOString()
-          }, ...prev]);
-          setGenerating(false);
-          alert('Video generation complete!');
-        } else if (data.status === 'failed') {
-          clearInterval(pollInterval);
-          setTasks(prev => prev.map(t => 
-            t.id === localTaskId ? { ...t, status: 'failed', error: data.error } : t
-          ));
-          setGenerating(false);
-          alert('Generation failed: ' + (data.error || 'Unknown error'));
-        } else if (data.progress) {
-          setTasks(prev => prev.map(t => 
-            t.id === localTaskId ? { ...t, progress: data.progress } : t
-          ));
-        }
-      } catch (error) {
-        console.error('Poll error:', error);
-      }
-    }, 2000);
-    
-    // Timeout after 2 minutes
-    setTimeout(() => {
-      clearInterval(pollInterval);
-      setTasks(prev => prev.map(t => 
-        t.id === localTaskId ? { ...t, status: 'failed', error: 'Generation timed out' } : t
-      ));
-      setGenerating(false);
-    }, 120000);
   };
   
   const downloadVideo = (url) => {
@@ -185,9 +176,20 @@ export default function Home() {
     if (isHistory) {
       setHistory(prev => prev.filter(item => item.id !== id));
     } else {
+      if (pollIntervals.current[id]) {
+        clearInterval(pollIntervals.current[id]);
+        delete pollIntervals.current[id];
+      }
       setTasks(prev => prev.filter(task => task.id !== id));
     }
   };
+  
+  // Cleanup intervals on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(pollIntervals.current).forEach(interval => clearInterval(interval));
+    };
+  }, []);
   
   return (
     <>
@@ -574,20 +576,13 @@ export default function Home() {
                   {tasks.map(task => (
                     <div key={task.id} className="item-card">
                       <div className="media-container">
-                        {task.status === 'processing' ? (
-                          <div className="task-overlay">
-                            <div className="spinner"></div>
-                            <div>{task.progress || 0}%</div>
-                            <div className="progress-bar">
-                              <div className="progress-fill" style={{ width: `${task.progress || 0}%` }}></div>
-                            </div>
+                        <div className="task-overlay">
+                          <div className="spinner"></div>
+                          <div>{task.progress || 0}%</div>
+                          <div className="progress-bar">
+                            <div className="progress-fill" style={{ width: `${task.progress || 0}%` }}></div>
                           </div>
-                        ) : task.status === 'failed' ? (
-                          <div className="task-overlay">
-                            <div>❌ Failed</div>
-                            <div style={{ fontSize: '0.8rem' }}>{task.error}</div>
-                          </div>
-                        ) : null}
+                        </div>
                       </div>
                       <div className="item-info">
                         <div className="item-prompt">{task.prompt}</div>
