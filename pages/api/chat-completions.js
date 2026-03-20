@@ -1,17 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
-import https from 'https';
-
-const axiosInstance = axios.create({
-  httpsAgent: new https.Agent({ rejectUnauthorized: false })
-});
 
 const CONFIG = {
   API_BASE: process.env.API_BASE || 'https://api.ximagine.io/aimodels/api/v1',
   ORIGIN_URL: process.env.ORIGIN_URL || 'https://ximagine.io',
   DEFAULT_MODEL: 'grok-video-normal',
   MAX_PROMPT_LENGTH: 1800,
-  MAX_POLL_TIME: 120,
+  MAX_POLL_TIME: 55, // Reduced for Vercel Hobby (max 60s)
   POLL_INTERVAL: 2,
   MODEL_MAP: {
     'grok-video-normal': { type: 'video', mode: 'normal', channel: 'GROK_IMAGINE', pageId: 901, name: 'Standard Realistic' },
@@ -52,10 +47,6 @@ function getHeaders(uniqueId = null) {
     'sec-ch-ua': ident.secChUa,
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
-    'sec-fetch-dest': 'empty',
-    'sec-fetch-mode': 'cors',
-    'sec-fetch-site': 'same-site',
-    'priority': 'u=1, i'
   };
 }
 
@@ -99,7 +90,7 @@ export default async function handler(req, res) {
   let prompt = '';
   let imageUrls = [];
   let aspectRatio = '1:1';
-  let clientPollMode = false;
+  let clientPollMode = true; // Force client poll mode for Vercel
   
   const lastContent = messages[messages.length - 1].content;
   
@@ -110,7 +101,7 @@ export default async function handler(req, res) {
         prompt = parsed.prompt || '';
         imageUrls = parsed.imageUrls || [];
         aspectRatio = parsed.aspectRatio || '1:1';
-        clientPollMode = parsed.clientPollMode || false;
+        clientPollMode = parsed.clientPollMode !== false; // Default to true
         if (parsed.model && CONFIG.MODEL_MAP[parsed.model]) {
           body.model = parsed.model;
         }
@@ -144,154 +135,53 @@ export default async function handler(req, res) {
   
   console.log(`[Request] model=${modelKey} | ratio=${aspectRatio} | prompt=${prompt.substring(0, 60)}...`);
   
-  // Set SSE headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  
-  const sendChunk = (content, finishReason = null, isReasoning = false) => {
-    const delta = isReasoning ? { reasoning_content: content } : { content: content };
-    const chunk = {
-      id: `chatcmpl-${uuidv4()}`,
-      object: 'chat.completion.chunk',
-      created: Math.floor(Date.now() / 1000),
-      model: modelKey,
-      choices: [{ index: 0, delta: delta, finish_reason: finishReason }]
-    };
-    return `data: ${JSON.stringify(chunk)}\n\n`;
-  };
-  
-  // Client poll mode
-  if (clientPollMode) {
-    try {
-      const headers = getHeaders(uniqueId);
-      const payload = buildPayload(prompt, modelConfig, aspectRatio, imageUrls);
-      const endpoint = modelConfig.type === 'video' 
-        ? `${CONFIG.API_BASE}/ai/video/create`
-        : `${CONFIG.API_BASE}/ai/grok/create`;
-      
-      const response = await axiosInstance.post(endpoint, payload, { headers, timeout: 30000 });
-      const responseData = response.data;
-      
-      if (responseData.code !== 200) {
-        throw new Error(`Upstream rejected: ${JSON.stringify(responseData)}`);
-      }
-      
-      const taskId = responseData.data;
-      
-      const result = {
-        id: `chatcmpl-${uuidv4()}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: modelKey,
-        choices: [{
-          index: 0,
-          delta: {
-            content: `\n\n✅ **Task Submitted**\n- TASK_ID: ${taskId}\n- UID: ${uniqueId}\n- TYPE: ${modelConfig.type}\n`
-          },
-          finish_reason: null
-        }]
-      };
-      
-      res.write(`data: ${JSON.stringify(result)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-      
-    } catch (error) {
-      console.error(`[Generation error] ${error.message}`);
-      res.write(sendChunk(`\n>>> ❌ Error: ${error.message}`));
-      res.write('data: [DONE]\n\n');
-      res.end();
-    }
-    return;
-  }
-  
-  // Sync mode
+  // Always use client poll mode for Vercel (fits within timeout limits)
   try {
-    res.write(sendChunk('🚀 **Initializing generation task...**\n', null, true));
-    
-    const headers = getHeaders();
+    const headers = getHeaders(uniqueId);
     const payload = buildPayload(prompt, modelConfig, aspectRatio, imageUrls);
     const endpoint = modelConfig.type === 'video' 
       ? `${CONFIG.API_BASE}/ai/video/create`
       : `${CONFIG.API_BASE}/ai/grok/create`;
     
-    res.write(sendChunk('📡 Submitting to Ximagine compute cluster...\n', null, true));
+    const response = await axios.post(endpoint, payload, { 
+      headers, 
+      timeout: 30000,
+      httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+    });
+    const responseData = response.data;
     
-    const createResponse = await axiosInstance.post(endpoint, payload, { headers, timeout: 30000 });
-    const createData = createResponse.data;
-    
-    if (createData.code !== 200) {
-      throw new Error(`Upstream rejected: ${JSON.stringify(createData)}`);
+    if (responseData.code !== 200) {
+      throw new Error(`Upstream rejected: ${JSON.stringify(responseData)}`);
     }
     
-    const taskId = createData.data;
-    res.write(sendChunk(`✅ Task created (ID: ${taskId})\n`, null, true));
+    const taskId = responseData.data;
     
-    const startTime = Date.now();
-    let lastProgress = -1;
+    const result = {
+      id: `chatcmpl-${uuidv4()}`,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model: modelKey,
+      choices: [{
+        index: 0,
+        delta: {
+          content: `\n\n✅ **Task Submitted**\n- TASK_ID: ${taskId}\n- UID: ${uniqueId}\n- TYPE: ${modelConfig.type}\n`
+        },
+        finish_reason: null
+      }]
+    };
     
-    while (Date.now() - startTime < CONFIG.MAX_POLL_TIME * 1000) {
-      const pollResponse = await axiosInstance.get(
-        `${CONFIG.API_BASE}/ai/${taskId}?channel=${modelConfig.channel}`,
-        { headers, timeout: 10000 }
-      );
-      const pollData = pollResponse.data;
-      const data = pollData.data || {};
-      
-      if (data.completeData) {
-        const inner = JSON.parse(data.completeData);
-        if (inner.code === 200 && inner.data && inner.data.result_urls && inner.data.result_urls.length > 0) {
-          const videoUrl = inner.data.result_urls[0];
-          const baseUrl = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers['x-forwarded-host'] || req.headers.host}`;
-          const proxyUrl = `${baseUrl}/api/proxy-download?url=${encodeURIComponent(videoUrl)}`;
-          
-          const resultMarkdown = `
-# 🎬 Video Generation Complete
-
-<video src="${proxyUrl}" controls autoplay loop style="width:100%; max-width:800px; border-radius:12px; box-shadow: 0 8px 32px rgba(0,0,0,0.2);"></video>
-
-## 📥 Download Links
-- [Download via Proxy](${proxyUrl})
-- [Direct Download](${videoUrl})
-
-**Details:**
-- Model: \`${modelKey}\`
-- Ratio: \`${aspectRatio}\`
-`;
-          
-          res.write(sendChunk(resultMarkdown));
-          res.write(sendChunk('', 'stop'));
-          break;
-        } else {
-          throw new Error(`Generation failed: ${JSON.stringify(inner)}`);
-        }
-      } else if (data.failMsg) {
-        throw new Error(`Generation failed: ${data.failMsg}`);
-      }
-      
-      const progress = data.progress || 0;
-      if (progress && Math.floor(progress * 100) !== lastProgress) {
-        lastProgress = Math.floor(progress * 100);
-        const barLen = 20;
-        const filled = Math.floor(progress * barLen);
-        const bar = '█'.repeat(filled) + '░'.repeat(barLen - filled);
-        res.write(sendChunk(`⏳ Rendering: [${bar}] ${lastProgress}%\n`, null, true));
-      }
-      
-      await new Promise(resolve => setTimeout(resolve, CONFIG.POLL_INTERVAL * 1000));
-    }
-    
-    if (Date.now() - startTime >= CONFIG.MAX_POLL_TIME * 1000) {
-      throw new Error('Generation timed out');
-    }
+    // Return the task info immediately
+    return res.json({
+      taskId: taskId,
+      uniqueId: uniqueId,
+      model: modelKey,
+      type: modelConfig.type,
+      prompt: prompt,
+      aspectRatio: aspectRatio
+    });
     
   } catch (error) {
     console.error(`[Generation error] ${error.message}`);
-    res.write(sendChunk(`\n>>> ❌ Error: ${error.message}`));
-    res.write(sendChunk('', 'stop'));
+    return res.status(500).json({ error: error.message });
   }
-  
-  res.write('data: [DONE]\n\n');
-  res.end();
 }
