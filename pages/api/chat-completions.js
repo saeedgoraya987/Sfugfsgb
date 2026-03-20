@@ -1,13 +1,14 @@
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
+import https from 'https';
+
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const CONFIG = {
   API_BASE: process.env.API_BASE || 'https://api.ximagine.io/aimodels/api/v1',
   ORIGIN_URL: process.env.ORIGIN_URL || 'https://ximagine.io',
   DEFAULT_MODEL: 'grok-video-normal',
   MAX_PROMPT_LENGTH: 1800,
-  MAX_POLL_TIME: 55, // Reduced for Vercel Hobby (max 60s)
-  POLL_INTERVAL: 2,
   MODEL_MAP: {
     'grok-video-normal': { type: 'video', mode: 'normal', channel: 'GROK_IMAGINE', pageId: 901, name: 'Standard Realistic' },
     'grok-video-fun': { type: 'video', mode: 'fun', channel: 'GROK_IMAGINE', pageId: 901, name: 'Fun Cartoon' },
@@ -90,7 +91,6 @@ export default async function handler(req, res) {
   let prompt = '';
   let imageUrls = [];
   let aspectRatio = '1:1';
-  let clientPollMode = true; // Force client poll mode for Vercel
   
   const lastContent = messages[messages.length - 1].content;
   
@@ -101,7 +101,6 @@ export default async function handler(req, res) {
         prompt = parsed.prompt || '';
         imageUrls = parsed.imageUrls || [];
         aspectRatio = parsed.aspectRatio || '1:1';
-        clientPollMode = parsed.clientPollMode !== false; // Default to true
         if (parsed.model && CONFIG.MODEL_MAP[parsed.model]) {
           body.model = parsed.model;
         }
@@ -135,7 +134,6 @@ export default async function handler(req, res) {
   
   console.log(`[Request] model=${modelKey} | ratio=${aspectRatio} | prompt=${prompt.substring(0, 60)}...`);
   
-  // Always use client poll mode for Vercel (fits within timeout limits)
   try {
     const headers = getHeaders(uniqueId);
     const payload = buildPayload(prompt, modelConfig, aspectRatio, imageUrls);
@@ -146,7 +144,7 @@ export default async function handler(req, res) {
     const response = await axios.post(endpoint, payload, { 
       headers, 
       timeout: 30000,
-      httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+      httpsAgent
     });
     const responseData = response.data;
     
@@ -156,21 +154,6 @@ export default async function handler(req, res) {
     
     const taskId = responseData.data;
     
-    const result = {
-      id: `chatcmpl-${uuidv4()}`,
-      object: 'chat.completion.chunk',
-      created: Math.floor(Date.now() / 1000),
-      model: modelKey,
-      choices: [{
-        index: 0,
-        delta: {
-          content: `\n\n✅ **Task Submitted**\n- TASK_ID: ${taskId}\n- UID: ${uniqueId}\n- TYPE: ${modelConfig.type}\n`
-        },
-        finish_reason: null
-      }]
-    };
-    
-    // Return the task info immediately
     return res.json({
       taskId: taskId,
       uniqueId: uniqueId,
