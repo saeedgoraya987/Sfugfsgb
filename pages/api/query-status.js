@@ -1,5 +1,8 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
+import https from 'https';
+
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const CONFIG = {
   API_BASE: process.env.API_BASE || 'https://api.ximagine.io/aimodels/api/v1',
@@ -52,7 +55,7 @@ export default async function handler(req, res) {
       { 
         headers, 
         timeout: 10000,
-        httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+        httpsAgent
       }
     );
     
