@@ -15,17 +15,6 @@ const nextConfig = {
       },
     ];
   },
-  // Increase API timeout for Vercel (max 60 seconds on Pro, 10 on Hobby)
-  api: {
-    responseLimit: false,
-    bodyParser: {
-      sizeLimit: '10mb',
-    },
-  },
-  // Optimize for Vercel deployment
-  images: {
-    domains: ['api.imgbb.com', 'upload.aiquickdraw.com'],
-  },
 };
 
 module.exports = nextConfig;
