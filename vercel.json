@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "pages/api/*.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "pages/index.js",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/$1"
+    }
+  ],
+  "env": {
+    "IMGBB_API_KEY": "",
+    "API_BASE": "https://api.ximagine.io/aimodels/api/v1",
+    "ORIGIN_URL": "https://ximagine.io",
+    "UPLOAD_URL": "https://upload.aiquickdraw.com/upload"
+  }
+}
