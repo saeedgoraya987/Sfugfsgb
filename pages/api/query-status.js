@@ -1,10 +1,5 @@
 import axios from 'axios';
-import https from 'https';
 import { v4 as uuidv4 } from 'uuid';
-
-const axiosInstance = axios.create({
-  httpsAgent: new https.Agent({ rejectUnauthorized: false })
-});
 
 const CONFIG = {
   API_BASE: process.env.API_BASE || 'https://api.ximagine.io/aimodels/api/v1',
@@ -52,9 +47,13 @@ export default async function handler(req, res) {
     const headers = getHeaders(uniqueId);
     const channel = taskType === 'image' ? 'GROK_TEXT_IMAGE' : 'GROK_IMAGINE';
     
-    const response = await axiosInstance.get(
+    const response = await axios.get(
       `${CONFIG.API_BASE}/ai/${taskId}?channel=${channel}`,
-      { headers, timeout: 10000 }
+      { 
+        headers, 
+        timeout: 10000,
+        httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+      }
     );
     
     const pollData = response.data;
